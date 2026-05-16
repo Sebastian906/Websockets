@@ -38,35 +38,34 @@ commentaryRouter.get('/', async (req, res) => {
         console.error('Failed to fetch commentary:', error);
         res.status(500).json({ error: 'Failed to fetch commentary.' });
     }
-})
+});
 
 commentaryRouter.post('/', async (req, res) => {
     const paramsResult = matchIdParamSchema.safeParse(req.params);
     if (!paramsResult.success) {
-        return res.status(400).json({
-            error: 'Invalid match ID.',
-            details: paramsResult.error.issues
-        });
+        return res.status(400).json({ error: 'Invalid match ID.', details: paramsResult.error.issues });
     }
 
     const bodyResult = createCommentarySchema.safeParse(req.body);
     if (!bodyResult.success) {
-        return res.status(400).json({
-            error: 'Invalid commentary payload.',
-            details: bodyResult.error.issues
-        });
+        return res.status(400).json({ error: 'Invalid commentary payload.', details: bodyResult.error.issues });
     }
 
     try {
-        const { minutes, ...rest } = bodyResult.data;
+        const { minute, ...rest } = bodyResult.data;
         const [result] = await db.insert(commentary).values({
             matchId: paramsResult.data.id,
-            minutes,
+            minute,
             ...rest
         }).returning();
+
+        if (res.app.locals.broadcastCommentary) {
+            res.app.locals.broadcastCommentary(Number(result.matchId), result);
+        }
+
         res.status(201).json({ data: result });
     } catch (error) {
         console.error('Failed to create commentary:', error);
         res.status(500).json({ error: 'Failed to create commentary.' });
     }
-}) 
+});
