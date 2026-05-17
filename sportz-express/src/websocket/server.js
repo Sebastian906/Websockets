@@ -72,12 +72,12 @@ function handleMessage(socket, data) {
 }
 
 export function attachWebSocketServer(server) {
-    const wss = new WebSocketServer({ server, path: '/websocket', maxPayload: 1024 * 1024 });
+    const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
     server.on('upgrade', async (req, socket, head) => {
         const { pathname } = new URL(req.url, `http://${req.headers.host}`);
 
-        if (pathname !== '/ws') {
+        if (pathname !== '/websocket') {
             return;
         }
 
