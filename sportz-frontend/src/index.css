@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+:root {
+  --brand-yellow: #FDE047;
+  --brand-blue: #BAE6FD;
+  --brand-dark: #18181B;
+  --box-shadow-hard: 4px 4px 0px 0px var(--brand-dark);
+  --box-shadow-hard-sm: 2px 2px 0px 0px var(--brand-dark);
+
+  /* Font helper: font is loaded from index.html */
+  --outfit-sans: 'Outfit', system-ui, 'Segoe UI', Roboto, sans-serif;
+
+}
+
+body {
+  margin: 0;
+  background-color: #FAFAFA;
+  color: var(--brand-dark);
+  font-family: var(--outfit-sans);
+}
+
+/* Brand helper classes (map CSS variables to utility-like classes) */
+.bg-brand-yellow {
+  background-color: var(--brand-yellow) !important;
+}
+
+.bg-brand-blue {
+  background-color: var(--brand-blue) !important;
+}
+
+.text-brand-dark {
+  color: var(--brand-dark) !important;
+}
+
+.shadow-hard {
+  box-shadow: var(--box-shadow-hard) !important;
+}
+
+.shadow-hard-sm {
+  box-shadow: var(--box-shadow-hard-sm) !important;
+}
+
+.ring-brand-yellow {
+  box-shadow: 0 0 0 4px var(--brand-yellow) !important;
+}
+
+/* Small helpers used by components */
+.min-w-12 {
+  min-width: 3rem;
+}
+
+.animate-in {
+  animation: fadeIn 240ms ease both;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
