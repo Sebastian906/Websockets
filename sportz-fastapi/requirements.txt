@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------
+# sportz-fastapi — Python 3.14 compatible dependencies
+#
+# Removed psycopg2-binary: it requires compilation from source on
+# Python 3.14 and is not needed when using asyncpg (pure-async driver).
+#
+# Pinned to minimum known-good versions; pip will resolve the latest
+# compatible release automatically.
+# ---------------------------------------------------------------
+
+# Web framework + ASGI server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Database — async driver (no C extension required) + ORM + migrations
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.30
+alembic>=1.13.0
+
+# Validation + settings
+pydantic>=2.8.0
+pydantic-settings>=2.3.0
+python-dotenv>=1.0.0
+
+# HTTP client (used by the seeder)
+httpx>=0.27.0
