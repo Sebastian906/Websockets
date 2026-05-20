@@ -11,7 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Constants 
+// Constants
 const (
 	pingInterval   = 30 * time.Second
 	writeWait      = 10 * time.Second
@@ -118,6 +118,7 @@ func (h *Hub) BroadcastCommentary(matchID int, comment any) {
 	}
 	h.mu.RUnlock()
 
+	log.Printf("[WebSocket] broadcasting commentary for match=%d to %d clients", matchID, len(clients))
 	for _, c := range clients {
 		c.sendJSON(payload)
 	}
@@ -245,53 +246,76 @@ func (c *Client) readPump() {
 // handleMessage parses an incoming client message and acts on it.
 // Mirrors handleMessage() in server.js and _handle_message() in server.py.
 func (c *Client) handleMessage(raw []byte) {
-	var msg struct {
-		Type     string        `json:"type"`
-		MatchID  *int          `json:"matchId"`
-		MatchIDs []interface{} `json:"matchIds"`
-	}
-	if err := json.Unmarshal(raw, &msg); err != nil {
+	// Decode into a generic map to accept numeric or string ids from clients.
+	var rawMsg map[string]interface{}
+	if err := json.Unmarshal(raw, &rawMsg); err != nil {
 		c.sendJSON(map[string]string{"type": "error", "message": "Invalid JSON"})
 		return
 	}
 
-	switch msg.Type {
+	t, _ := rawMsg["type"].(string)
+	switch t {
 	case "subscribe":
-		if msg.MatchID == nil {
+		idVal, ok := rawMsg["matchId"]
+		if !ok {
 			return
 		}
-		c.hub.subscribe(*msg.MatchID, c)
-		c.sendJSON(map[string]any{"type": "subscribed", "matchId": *msg.MatchID})
+		id, ok := parseMatchID(idVal)
+		if !ok {
+			return
+		}
+		log.Printf("[WebSocket] subscribe match=%d", id)
+		c.hub.subscribe(id, c)
+		c.sendJSON(map[string]any{"type": "subscribed", "matchId": id})
 
 	case "unsubscribe":
-		if msg.MatchID == nil {
+		idVal, ok := rawMsg["matchId"]
+		if !ok {
 			return
 		}
-		c.hub.unsubscribe(*msg.MatchID, c)
-		c.sendJSON(map[string]any{"type": "unsubscribed", "matchId": *msg.MatchID})
+		id, ok := parseMatchID(idVal)
+		if !ok {
+			return
+		}
+		log.Printf("[WebSocket] unsubscribe match=%d", id)
+		c.hub.unsubscribe(id, c)
+		c.sendJSON(map[string]any{"type": "unsubscribed", "matchId": id})
 
 	case "setSubscriptions":
-		if len(msg.MatchIDs) == 0 {
+		rawIds, ok := rawMsg["matchIds"].([]interface{})
+		if !ok || len(rawIds) == 0 {
 			return
 		}
-		// Accept numbers or numeric strings in the provided array.
-		ids := make([]int, 0, len(msg.MatchIDs))
-		for _, v := range msg.MatchIDs {
-			switch t := v.(type) {
-			case float64:
-				ids = append(ids, int(t))
-			case string:
-				if n, err := strconv.Atoi(t); err == nil {
-					ids = append(ids, n)
-				}
+		ids := make([]int, 0, len(rawIds))
+		for _, v := range rawIds {
+			if id, ok := parseMatchID(v); ok {
+				ids = append(ids, id)
 			}
 		}
-		for _, id := range ids {
-			c.hub.subscribe(id, c)
-		}
+		// Replace the client's subscriptions with the provided list.
+		c.hub.setClientSubscriptions(c, ids)
+		log.Printf("[WebSocket] setSubscriptions: %v", ids)
 		c.sendJSON(map[string]any{"type": "subscriptions", "matchIds": ids})
 
-	// Unknown messages are silently ignored — same behaviour as both JS and Python.
+		// Unknown messages are silently ignored — same behaviour as both JS and Python.
+	}
+}
+
+// parseMatchID accepts a JSON-decoded value (number or numeric string)
+// and returns the integer match id if possible.
+func parseMatchID(v interface{}) (int, bool) {
+	switch t := v.(type) {
+	case float64:
+		return int(t), true
+	case string:
+		if n, err := strconv.Atoi(t); err == nil {
+			return n, true
+		}
+		return 0, false
+	case int:
+		return t, true
+	default:
+		return 0, false
 	}
 }
 
@@ -302,4 +326,80 @@ var Upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin:     func(_ *http.Request) bool { return true },
+}
+
+// setClientSubscriptions replaces the client's subscription set with the
+// provided list of match IDs. It removes the client from matches it no
+// longer subscribes to and adds it to new matches. Must be safe for
+// concurrent callers.
+func (h *Hub) setClientSubscriptions(c *Client, ids []int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Build a set of requested IDs for quick lookup.
+	requested := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		requested[id] = struct{}{}
+	}
+
+	// Determine which existing subscriptions should be removed.
+	toRemove := make([]int, 0)
+	c.mu.Lock()
+	for mid := range c.subscriptions {
+		if _, ok := requested[mid]; !ok {
+			toRemove = append(toRemove, mid)
+		}
+	}
+	c.mu.Unlock()
+
+	// Remove subscriptions that are no longer requested.
+	for _, mid := range toRemove {
+		h.removeSubscription(mid, c)
+		c.mu.Lock()
+		delete(c.subscriptions, mid)
+		c.mu.Unlock()
+	}
+
+	// Add any requested subscriptions that are not already present.
+	for _, id := range ids {
+		if h.matchSubscribers[id] == nil {
+			h.matchSubscribers[id] = make(map[*Client]struct{})
+		}
+		if _, ok := h.matchSubscribers[id][c]; !ok {
+			h.matchSubscribers[id][c] = struct{}{}
+			c.mu.Lock()
+			c.subscriptions[id] = struct{}{}
+			c.mu.Unlock()
+		}
+	}
+}
+
+// SubscriberCount returns the number of clients subscribed to a match.
+func (h *Hub) SubscriberCount(matchID int) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	subs := h.matchSubscribers[matchID]
+	if subs == nil {
+		return 0
+	}
+	return len(subs)
+}
+
+// BroadcastCommentaryToAll sends a commentary event to every connected client.
+// This is used for seeder-originated inserts to ensure browsers viewing a
+// match receive the event even if a per-match subscription was not seen
+// (e.g., due to timing or client reconnection). Messages are sent silently
+// (no hub-level log) so seeder traffic doesn't clutter server logs.
+func (h *Hub) BroadcastCommentaryToAll(matchID int, comment any) {
+	payload := map[string]any{"type": "commentary", "data": comment}
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.allClients))
+	for c := range h.allClients {
+		clients = append(clients, c)
+	}
+	h.mu.RUnlock()
+
+	for _, c := range clients {
+		c.sendJSON(payload)
+	}
 }

@@ -3,6 +3,7 @@ package routes
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -261,7 +262,24 @@ func (h *CommentaryHandler) createCommentary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	h.hub.BroadcastCommentary(matchID, entry)
+	// If the request comes from the Go seeder (default Go HTTP client UA),
+	// keep server logs minimal and broadcast the event to all connected
+	// clients so the browser will receive it even if a per-match
+	// subscription wasn't registered yet. This avoids noisy per-comment
+	// logs while ensuring the frontend displays seed events.
+	ua := r.Header.Get("User-Agent")
+	isSeed := strings.Contains(strings.ToLower(ua), "go-http-client")
+
+	if isSeed {
+		log.Printf("[Commentary] seed insert id=%d match=%d", entry.ID, entry.MatchID)
+		h.hub.BroadcastCommentaryToAll(matchID, entry)
+	} else {
+		if b, err := json.Marshal(entry); err == nil {
+			log.Printf("[Commentary] created entry: %s", string(b))
+		}
+		log.Printf("[Commentary] subscribers for match=%d: %d", matchID, h.hub.SubscriberCount(matchID))
+		h.hub.BroadcastCommentary(matchID, entry)
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"data": entry})
 }
 
