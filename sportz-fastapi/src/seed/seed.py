@@ -344,7 +344,7 @@ async def seed() -> None:
 
     feed, seed_matches = load_seed_data()
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         matches_list = await fetch_matches(client)
 
         match_map: Dict[int, dict] = {}
