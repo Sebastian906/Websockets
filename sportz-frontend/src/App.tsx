@@ -45,7 +45,7 @@ const App: React.FC = () => {
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-brand-yellow border-2 border-black rounded-2xl p-6 shadow-hard">
           <div>
             <h1 className="text-3xl font-black tracking-tight text-brand-dark mb-1">
-              Spotrz
+              Sportz
             </h1>
             <p className="text-sm font-medium opacity-80">Real-time match data demo</p>
           </div>
