@@ -2,7 +2,7 @@
 
 Una plataforma integral para partidos deportivos en tiempo real que demuestra la arquitectura WebSocket en múltiples frameworks de backend (Express, FastAPI y Go). El sistema transmite comentarios de partidos en vivo y actualizaciones de marcadores a los clientes conectados mediante WebSockets para la comunicación bidireccional.
 
---
+---
 
 ## Fundamentos de WebSockets
 
