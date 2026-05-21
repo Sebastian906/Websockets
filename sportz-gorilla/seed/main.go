@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -14,7 +13,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -260,19 +260,34 @@ func buildMatchTimes(sm SeedMatch) (time.Time, time.Time) {
 }
 
 func loadSeedData() ([]FeedEntry, []SeedMatch, error) {
-	// Resolve path relative to this file (mirrors DATA_FILE in Python seeder).
-	_, file, _, _ := runtime.Caller(0)
-	dataPath := filepath.Join(filepath.Dir(file), "..", "src", "data", "data.json")
+	// Resolve path relative to the working directory first (most reliable),
+	// then fall back to paths relative to the source file location.
+	candidates := []string{
+		"data/data.json",
+		"../data/data.json",
+		"src/data/data.json",
+		"../src/data/data.json",
+		"data.json",
+	}
 
-	// Fallback locations: first try the repo-level `data/data.json`,
-	// then a `data.json` next to the binary (current working dir).
-	if _, err := os.Stat(dataPath); os.IsNotExist(err) {
-		alt := filepath.Join(filepath.Dir(file), "..", "data", "data.json")
-		if _, err2 := os.Stat(alt); err2 == nil {
-			dataPath = alt
-		} else {
-			dataPath = "data.json"
+	// Also try relative to the executable's directory.
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(dir, "data", "data.json"),
+			filepath.Join(dir, "..", "data", "data.json"),
+		)
+	}
+
+	var dataPath string
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			dataPath = c
+			break
 		}
+	}
+	if dataPath == "" {
+		return nil, nil, errors.New("data.json not found; run the seed from the sportz-gorilla directory")
 	}
 
 	raw, err := os.ReadFile(dataPath)
@@ -282,7 +297,6 @@ func loadSeedData() ([]FeedEntry, []SeedMatch, error) {
 
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		// Try as a plain array.
 		var feed []FeedEntry
 		if err2 := json.Unmarshal(raw, &feed); err2 != nil {
 			return nil, nil, errors.New("seed data must be an array or contain a commentary/feed array")
@@ -308,8 +322,8 @@ func loadSeedData() ([]FeedEntry, []SeedMatch, error) {
 }
 
 type matchState struct {
-	match     Match
-	fakeNext  string
+	match    Match
+	fakeNext string
 }
 
 func main() {
@@ -327,14 +341,13 @@ func main() {
 		log.Fatalf("Failed to fetch existing matches: %v", err)
 	}
 
-	matchMap := make(map[int]*matchState)     // id → state
-	matchKeyMap := make(map[string]*Match)    // "sport|home|away" → match
+	matchMap := make(map[int]*matchState)
+	matchKeyMap := make(map[string]*Match)
 
 	for i := range existingMatches {
 		m := &existingMatches[i]
-		if forceLive && !isLiveMatch(*m) {
-			continue
-		}
+		// Register all existing matches regardless of live status so that
+		// commentary entries can be associated even with non-live matches.
 		key := fmt.Sprintf("%s|%s|%s", m.Sport, m.HomeTeam, m.AwayTeam)
 		if _, exists := matchKeyMap[key]; !exists {
 			matchKeyMap[key] = m
@@ -366,7 +379,13 @@ func main() {
 		log.Fatal("No matches found or created in the database.")
 	}
 
-	for _, entry := range feed {
+	// Expand the feed to cover seed matches that don't have explicit entries
+	// (clone templates by sport), then randomize/interleave entries across
+	// matches so the seeded commentary is spread out similarly to the JS seed.
+	expandedFeed := expandFeedForMatches(feed, seedMatches)
+	randomizedFeed := buildRandomizedFeed(expandedFeed, matchMap)
+
+	for _, entry := range randomizedFeed {
 		if entry.MatchID == nil {
 			log.Printf("Skipping entry — matchId missing: %s", entry.Message)
 			continue
@@ -395,4 +414,238 @@ func randomSide() string {
 		return "home"
 	}
 	return "away"
+}
+
+// replaceTrailingTeam substitutes a trailing team name in parentheses
+// e.g. "... (Arsenal FC)" -> "... (New Team)" when a mapping exists.
+func replaceTrailingTeam(message string, replacements map[string]string) string {
+	if message == "" {
+		return message
+	}
+	re := regexp.MustCompile(`\(([^)]+)\)\s*$`)
+	m := re.FindStringSubmatch(message)
+	if len(m) < 2 {
+		return message
+	}
+	if newTeam, ok := replacements[m[1]]; ok {
+		return re.ReplaceAllString(message, fmt.Sprintf("(%s)", newTeam))
+	}
+	return message
+}
+
+// cloneCommentaryEntries clones a set of feed entries from a template match
+// into a target match, replacing team names and updating matchId.
+func cloneCommentaryEntries(entries []FeedEntry, templateMatch SeedMatch, targetMatch SeedMatch) []FeedEntry {
+	if targetMatch.ID == nil {
+		return nil
+	}
+	replacements := map[string]string{
+		templateMatch.HomeTeam: targetMatch.HomeTeam,
+		templateMatch.AwayTeam: targetMatch.AwayTeam,
+	}
+	cloned := make([]FeedEntry, 0, len(entries))
+	for _, e := range entries {
+		ne := e
+		// set a new pointer for MatchID
+		id := *targetMatch.ID
+		ne.MatchID = &id
+
+		// replace team string if it matches the template
+		if e.Team != nil {
+			if *e.Team == templateMatch.HomeTeam {
+				t := targetMatch.HomeTeam
+				ne.Team = &t
+			} else if *e.Team == templateMatch.AwayTeam {
+				t := targetMatch.AwayTeam
+				ne.Team = &t
+			}
+		}
+
+		// replace trailing team in message
+		ne.Message = replaceTrailingTeam(e.Message, replacements)
+		cloned = append(cloned, ne)
+	}
+	return cloned
+}
+
+func inningsRank(period *string) int {
+	if period == nil || *period == "" {
+		return 0
+	}
+	lower := strings.ToLower(*period)
+	re := regexp.MustCompile(`(\d+)(st|nd|rd|th)`)
+	if m := re.FindStringSubmatch(lower); len(m) >= 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n
+		}
+	}
+	if strings.Contains(lower, "first") {
+		return 1
+	}
+	if strings.Contains(lower, "second") {
+		return 2
+	}
+	if strings.Contains(lower, "third") {
+		return 3
+	}
+	if strings.Contains(lower, "fourth") {
+		return 4
+	}
+	return 0
+}
+
+func normalizeCricketFeed(entries []FeedEntry, match Match) []FeedEntry {
+	sorted := make([]FeedEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool {
+		inningsDiff := inningsRank(sorted[i].Period) - inningsRank(sorted[j].Period)
+		if inningsDiff != 0 {
+			return inningsDiff < 0
+		}
+		seqA := math.MaxInt32
+		seqB := math.MaxInt32
+		if sorted[i].Sequence != nil {
+			seqA = *sorted[i].Sequence
+		}
+		if sorted[j].Sequence != nil {
+			seqB = *sorted[j].Sequence
+		}
+		if seqA != seqB {
+			return seqA < seqB
+		}
+		minA := math.MaxInt32
+		minB := math.MaxInt32
+		if sorted[i].Minute != nil {
+			minA = *sorted[i].Minute
+		}
+		if sorted[j].Minute != nil {
+			minB = *sorted[j].Minute
+		}
+		return minA < minB
+	})
+	return sorted
+}
+
+func expandFeedForMatches(feed []FeedEntry, seedMatches []SeedMatch) []FeedEntry {
+	if len(seedMatches) == 0 {
+		return feed
+	}
+
+	byMatch := make(map[int][]FeedEntry)
+	for _, e := range feed {
+		if e.MatchID == nil {
+			continue
+		}
+		id := *e.MatchID
+		byMatch[id] = append(byMatch[id], e)
+	}
+
+	templateBySport := make(map[string]*SeedMatch)
+	for i := range seedMatches {
+		sm := &seedMatches[i]
+		if sm.ID == nil {
+			continue
+		}
+		if _, ok := byMatch[*sm.ID]; ok {
+			if _, exists := templateBySport[sm.Sport]; !exists {
+				templateBySport[sm.Sport] = sm
+			}
+		}
+	}
+
+	expanded := make([]FeedEntry, len(feed))
+	copy(expanded, feed)
+
+	for i := range seedMatches {
+		sm := seedMatches[i]
+		if sm.ID == nil {
+			continue
+		}
+		if _, ok := byMatch[*sm.ID]; ok {
+			continue
+		}
+		tmpl := templateBySport[sm.Sport]
+		if tmpl == nil || tmpl.ID == nil {
+			continue
+		}
+		templEntries := byMatch[*tmpl.ID]
+		if len(templEntries) == 0 {
+			continue
+		}
+		cloned := cloneCommentaryEntries(templEntries, *tmpl, sm)
+		if len(cloned) > 0 {
+			expanded = append(expanded, cloned...)
+		}
+	}
+
+	return expanded
+}
+
+func buildRandomizedFeed(feed []FeedEntry, matchMap map[int]*matchState) []FeedEntry {
+	buckets := make(map[int][]FeedEntry)
+	total := 0
+	for _, e := range feed {
+		if e.MatchID == nil {
+			continue
+		}
+		id := *e.MatchID
+		buckets[id] = append(buckets[id], e)
+		total++
+	}
+
+	for id, entries := range buckets {
+		state := matchMap[id]
+		if state != nil && strings.ToLower(state.match.Sport) == "cricket" {
+			buckets[id] = normalizeCricketFeed(entries, state.match)
+		}
+	}
+
+	matchIDs := make([]int, 0, len(buckets))
+	for id := range buckets {
+		matchIDs = append(matchIDs, id)
+	}
+	if len(matchIDs) == 0 {
+		return feed
+	}
+
+	randomized := make([]FeedEntry, 0, total)
+	last := -1
+	for len(randomized) < total {
+		candidates := make([]int, 0, len(matchIDs))
+		for _, id := range matchIDs {
+			if len(buckets[id]) > 0 {
+				candidates = append(candidates, id)
+			}
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		selectable := candidates
+		if last != -1 && len(candidates) > 1 {
+			// filter out last if possible
+			alt := make([]int, 0, len(candidates))
+			for _, id := range candidates {
+				if id != last {
+					alt = append(alt, id)
+				}
+			}
+			if len(alt) > 0 {
+				selectable = alt
+			}
+		}
+		choice := selectable[rand.Intn(len(selectable))]
+		next := buckets[choice][0]
+		buckets[choice] = buckets[choice][1:]
+		randomized = append(randomized, next)
+		last = choice
+	}
+
+	// Append non-match-specific entries (if any) unchanged at the end.
+	for _, e := range feed {
+		if e.MatchID == nil {
+			randomized = append(randomized, e)
+		}
+	}
+
+	return randomized
 }

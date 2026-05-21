@@ -3,7 +3,6 @@ package routes
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -172,6 +171,7 @@ func (h *CommentaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // listCommentary — GET /matches/{id}/commentary
+// Mirrors the GET / handler in commentary.js and list_commentary() in commentary.py.
 func (h *CommentaryHandler) listCommentary(w http.ResponseWriter, r *http.Request, matchID int) {
 	q, err := validation.ParseListCommentaryQuery(r.URL.Query().Get("limit"))
 	if err != nil {
@@ -216,6 +216,9 @@ func (h *CommentaryHandler) listCommentary(w http.ResponseWriter, r *http.Reques
 }
 
 // createCommentary — POST /matches/{id}/commentary
+// Mirrors the POST / handler in commentary.js and create_commentary() in commentary.py.
+// Broadcasts the new entry to all WebSocket clients subscribed to the match,
+// exactly as Express and FastAPI do — no special-casing by caller.
 func (h *CommentaryHandler) createCommentary(w http.ResponseWriter, r *http.Request, matchID int) {
 	var body validation.CreateCommentaryBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -262,24 +265,9 @@ func (h *CommentaryHandler) createCommentary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// If the request comes from the Go seeder (default Go HTTP client UA),
-	// keep server logs minimal and broadcast the event to all connected
-	// clients so the browser will receive it even if a per-match
-	// subscription wasn't registered yet. This avoids noisy per-comment
-	// logs while ensuring the frontend displays seed events.
-	ua := r.Header.Get("User-Agent")
-	isSeed := strings.Contains(strings.ToLower(ua), "go-http-client")
+	// Broadcast to subscribers of this match — identical to Express and FastAPI.
+	h.hub.BroadcastCommentary(matchID, entry)
 
-	if isSeed {
-		log.Printf("[Commentary] seed insert id=%d match=%d", entry.ID, entry.MatchID)
-		h.hub.BroadcastCommentaryToAll(matchID, entry)
-	} else {
-		if b, err := json.Marshal(entry); err == nil {
-			log.Printf("[Commentary] created entry: %s", string(b))
-		}
-		log.Printf("[Commentary] subscribers for match=%d: %d", matchID, h.hub.SubscriberCount(matchID))
-		h.hub.BroadcastCommentary(matchID, entry)
-	}
 	writeJSON(w, http.StatusCreated, map[string]any{"data": entry})
 }
 
@@ -293,8 +281,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // extractMatchID reads the match ID from the URL path.
 // The path pattern is /matches/{id}/commentary.
 func extractMatchID(r *http.Request) (int, error) {
-	// Expected path: /matches/{id}/commentary
-	// Split the path and extract the ID segment.
 	parts := strings.Split(r.URL.Path, "/")
 	// parts[0] == "", parts[1] == "matches", parts[2] == id, parts[3] == "commentary"
 	if len(parts) < 3 || parts[1] != "matches" {
@@ -311,7 +297,7 @@ func extractMatchID(r *http.Request) (int, error) {
 	return id, nil
 }
 
-// nullableBytes returns nil if b is empty, otherwise b.
+// nullableBytes returns nil if b is empty, otherwise returns b as string.
 // Used to avoid sending an empty JSON string to a JSONB column.
 func nullableBytes(b []byte) any {
 	if len(b) == 0 {
