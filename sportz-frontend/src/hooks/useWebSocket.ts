@@ -68,7 +68,7 @@ export const useWebSocket = (
                 }
             };
 
-            socket.onerror = (event) => {
+            socket.onerror = (_event) => {
                 // WebSocket error events are generic in browsers and don't contain descriptive messages.
                 // We log it to indicate an issue occurred.
                 console.warn('[WebSocket] Connection error occurred');
